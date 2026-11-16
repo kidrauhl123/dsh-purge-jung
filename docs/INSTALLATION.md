@@ -1,13 +1,40 @@
 # 安装、升级与故障排查
 
-当前版本 **1.6.60**。面向用户与协助安装的 Agent。支持的安装器环境：Linux CLI/Web；macOS Desktop；Windows 11 的 PowerShell 5.1/7。完整 Windows 宿主补丁及界面验收与安装器测试分开，不能因安装通过就宣称全部功能正常。
+当前版本 **1.7.18**。面向用户与协助安装的 Agent。支持的安装器环境：Linux CLI/Web；macOS Desktop；Windows 11 的 PowerShell 5.1/7。完整 Windows 宿主补丁及界面验收与安装器测试分开，不能因安装通过就宣称全部功能正常。
 
 ## 安装前
 
 - 确认用户授权，读取实际 DSH 版本和应用路径，先打开一次完成 profile 初始化。
-- 默认数据目录 `~/.dsh`；Desktop 默认 profile `desktop`，Linux CLI/Web 安装器默认 `web`。不同目录/profile 必须显式指定，不能自动选另一个实例。
+- 默认数据目录 `~/.dsh`；旧 Desktop CLI 默认 profile `desktop`；带独立 `@deepseek-ai/dsh` CLI 的新桌面壳及 CLI/Web 默认 `web`。不同目录/profile 必须显式指定，不能自动选另一个实例。
 - 保留正在运行的任务；安装不会停止进程或自动重启。用户在任务结束后手动重开。
 - 不需要管理员权限或全局 Node/pnpm；Desktop 入口使用该应用的 Electron 运行时和 CLI。遇到权限问题先核对路径，不建议盲目提权。
+
+## 手动选择插件源码目录
+
+从 GitHub 下载 Source code ZIP 或 clone 后，进入同时含有插件的 `package.json` 和 `package-lock.json` 的目录。在该目录用 Node.js 和 npm 执行以下两条命令，两条均成功后再去 DSH 选择这个目录。下载 ZIP 的外层解压目录可能还有一层同名子目录。
+
+```sh
+npm ci --omit=dev --ignore-scripts
+node --input-type=module -e "await import('./lib/index.js'); console.log('插件入口加载成功')"
+```
+
+源码归档不包含运行依赖。报错若点名缺少 `yaml`，先核对执行目录和 npm 的退出状态。其它模块或语法错误请保留原报错。通过官方 CLI 添加发行 TGZ 时由包管理器解析依赖。
+
+## pnpm 源码工作区的 Web 升级与回滚
+
+从工作区启动时，先核对运行进程的入口、`DSH_HOME` 和 profile。工作区包名应为 `@deepseek-ai/dsh`，读取它的 `package.json` 中声明的 `bin.dsh`。链接解析到 `apps/cli` 属于正常布局。修订版使用该包的入口进行升级和回滚。
+
+旧版若在面板中提示“无法定位当前 DSH 实例的 CLI”，可先从**同一工作区**运行官方 CLI，在当前 profile 上添加已验证 SHA256 的新版发行包。例如对于报告中的 rc.2 布局，在工作区根目录执行 `node ./apps/cli/lib/bin.js plugin --profile web add ./dsh-purge-community.tgz`。前提是该文件为已核验的本地发行包，且当前终端的 DSH_HOME 与运行服务一致；其它布局按实际 bin 和 profile 替换。等用户手动重开服务，再验收面板升级和回滚。
+
+## 新桌面布局与更新镜像（1.6.75）
+
+Windows 的 `DSH Desktop.exe` 与旧 `DeepSeek Harness.exe` 都可作为候选；仍需核对包内 CLI 身份。新布局从 `@deepseek-ai/dsh/package.json` 的 `bin` 读取入口，沿用同一安装的 `harness-node-entry.mjs`、打包 pnpm 和锁恢复启动器。不要为了绕过“pnpm 找不到”安装全局 pnpm 或选另一份 DSH。若多个候选并存，用 `-DshExe` 明确指定。自定义 profile 始终用 `-Profile` / `--profile` 指定，缺少初始化时停止，不搬迁用户数据猜测匹配。
+
+`sealed_host: true` 表示在 `app.asar` 中识别到宿主，尚不是可写解包目录。诊断不再把它当作“没有宿主”，也不会把虚拟归档路径交给直接文件写入。已有解包目录损坏时，继续报告缺失或读取失败。
+
+插件的「更新通道」可保存可选 HTTPS 镜像前缀，如 `https://gh-proxy.org/`。镜像覆盖发行查询、raw 元数据与包传输；GitHub Token 不发给镜像，包括镜像发起的重定向。代理与镜像可同时使用，只影响插件更新请求，不改系统或模型代理。显式清空镜像后停用；旧配置未声明此字段时继续兼容 `PURGE_GH_MIRROR`。
+
+**镜像不是校验来源**：安装仍需经 GitHub 官方接口取得发行摘要，旧发行必要时读取官方 SHA256SUMS。可通过现有更新代理连接 GitHub。官方校验不可达时停止，不接受镜像自报摘要，不关闭 TLS 或 SHA256。首次安装脚本的下载路径与插件内更新通道分开，不能声称尚未安装的插件能读取其更新设置。
 
 ## 先区分官方入口和社区安装器
 
@@ -60,6 +87,36 @@ macOS 默认要求 `/Applications/DeepSeek Harness.app`。自定义安装位置�
 
 `HEAD https://github.com/... UND_ERR_DESTROYED` 属 GitHub 网络问题。保留完整脱敏日志区分错误；切 npm 源不保证修复 GitHub 连接。
 
+## 启动告警：Cannot find package 'dsh-purge'
+
+宿主启动或面板报：
+
+```
+dsh: warning: 1 entry did not activate
+dsh-purge (dsh-purge): failed to import
+Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'dsh-purge' imported from <profile>
+```
+
+这条错误表示当前 profile 无法解析某个入口引用，**不能只凭错误文本认定是重复配置**。归档上游 README 的历史独立包示例若被照抄，可能留下指向旧包名的手工入口；依赖未安装、链接失效、选错 profile 或 bundle 未启用也可能造成导入失败。
+
+按以下顺序排查，不要卸载重装或按名称前缀批量删除：
+
+1. 确认报错进程的 DSH、home、profile，以及实际启用的 bundle。检查该 profile 的依赖、实际包的 `package.json` 和链接目标是否存在。社区包名是 `dsh-purge-community`；历史依赖别名 `dsh-purge` 若实际解析到社区包，也受支持，**不能仅凭别名就删除**。
+2. 修改前备份该 profile 的 `cordis.patch.yml`、`package.json` 和现有锁文件。保留完整错误、入口 ID 和解析路径用于核对，分享日志前脱敏。
+3. 只有确认 bundle 已提供对应入口、profile 又手工插入了同一个入口时，才迁移这一个重复项。将原项的 **全部 `config`（包括提示词、未知字段和显式 false/空字符串）** 合并到同 ID 的 profile 配置覆盖项；出现同名字段冲突时，先让用户决定保留哪一值，不以默认值覆盖。若原项还有无法确认含义的入口字段，先保留并报告，不擅自丢弃。
+4. 核对配置保留后，只移除已确认重复的那个插入项。一个 `insert` 容器可能还有其他插件，必须保留；只有容器变空时才可移除空容器。`dsh-purge-redteam*` 等是 bundle 的合法入口，**不能按前缀删除**，也不要直接修改已安装包里的 bundle 源文件。
+5. 若入口仅存在于 bundle，可在 profile 按同一个 `id` 添加配置覆盖，不再添加 `insert` 或 `name`。下面只是结构示例；实际迁移须使用用户原来的完整配置，不要照抄示例值覆盖：
+
+```yaml
+- id: dsh-purge
+  config:
+    autoUpdateOnStart: false
+```
+
+6. 核对最终有效入口、依赖解析和保留的配置后，由用户选择何时完整退出并重新打开 DSH，不自动重启。仍失败时，根据完整异常区分依赖、链接、profile 或服务故障，**不能认定还有重复入口而继续删除**。有歧义时停止迁移，保留备份和现场。
+
+安装器遇到不能安全判断的手工入口仍会拒绝迁移并保留配置；本文不增加自动删配置逻辑。更详细的配置合并说明见 [维护说明](maintenance-issue-53.md)。
+
 ## 失败、备份与回滚
 
 - 记录失败阶段、DSH/插件版本、profile、下载源与 backup_id；隐藏用户名、私有地址、token。
@@ -75,7 +132,7 @@ macOS 默认要求 `/Applications/DeepSeek Harness.app`。自定义安装位置�
 
 有面板时优先选择「Purge → 状态 → 本机备份」中的备份，确认记录对应本次安装。面板不可用时，使用下列方式运行当前 profile 安装的 CLI。`purge-community` 是 profile 内的 bin，不保证在全局 PATH；**不要 `npm install -g` 来补命令**。
 
-CLI/Web（macOS、Linux；已有 Node ≥18 和该实例的 `dsh` 命令）：
+CLI/Web（macOS、Linux；已有 Node ≥18 和该实例的 `dsh` 命令；红队工具另需 ≥22.5）：
 
 ```sh
 export DSH_HOME="${DSH_HOME:-$HOME/.dsh}"
@@ -168,3 +225,23 @@ macOS 不复制顶层 `Info.plist`，不创建 `.app` 路径，不通过 Finder�
 明确指定 `DSH_APP` / `DSH_EXE` 的目标校验失败后即停止，不会自动换到另一份应用。维护代码不遍历挂载卷、工作目录或任意参数的父目录；自定义安装请提供实际路径。显式请求自动发现时，仍可查询已知默认位置和系统登记，但多个有效目标需要用户选择。
 
 架构分目录运行时按当前执行进程的 `process.arch` 选择，不跨架构猜测。官方 CLI 需要 `app/runtime/primary-runtime/...`，因此新链接直接指向有效的架构子目录。已有真实目录或指向其他有效目录的链接保留；冲突明确报错，不自动覆盖。实测范围和复现步骤见 [PR #78 验收记录](pr78-runtime-integrity.md)。
+
+### 旧 profile 的浮动下载地址阻塞其他插件（#164）
+
+症状是安装另一个插件时，pnpm 报错的地址却是 Purge 的 `releases/latest/download`。在插件页停用只会改变加载状态，profile 依赖仍会参与解析。
+
+取得包含此修复的发行包并按上文核对 SHA256 后，用该包解出的 `bin/community.js migrate <已校验的本地 tgz 路径>` 对原 profile 执行迁移。保留原 DSH_HOME 和 DSH_PROFILE。迁移器会把本项目已识别的旧浮动地址替换为本机持久归档，已停用的插件继续停用。迁移失败会恢复原清单；发生错误时保留报错用于诊断。
+
+### Windows 官方桌面更新交接（主分支）
+
+从 DSH 确认安装官方桌面更新后，社区版会在 desktop 和 web profile 中查找交接助手，兼容两个包名 `dsh-purge-community` 和 `dsh-purge`。普通单文件更新会先比对官方更新器提供的 SHA512、目标版本和 DeepSeek 的 Authenticode 发布者，等待桌面正常退出，再运行安装器。整个过程不自动重写更新后的宿主。
+
+如果更新后版本未变，可查看 `<DSH_HOME>/logs/official-installer/update-*/result.jsonl` 的最后一条记录。`waiting-for-exit` 表示助手仍在等原桌面进程退出，`failed` 会记录失败原因，`installed` 表示安装器返回成功，目标 EXE 的 FileVersion 也符合预期。分包和需要提权的安装由 DSH 官方更新器直接处理，请查看官方安装器日志。
+
+### 工作区与会话权限
+
+新会话沿用宿主和用户选择的权限。默认保留 DSH 的文件围栏、子进程沙箱以及与扩大权限有关的审批检查。此前显式选择的权限覆盖补丁仍由 `tuning.extraPatches` 决定。
+
+升级后点「应用」，再正常退出并手动打开 DSH。迁移以宿主文件旁的 `.dshpurge.bak` 为基线，重演旧补丁并比对当前内容，只撤回能证明属于插件的权限改动。保留其它已验证的补丁和用户 profile；不会重写历史会话中已保存的权限选择。遇到残缺备份、链接或无法归属的改动，查看补丁明细中的路径及错误，保留文件和备份进行比对。
+
+权限验收需同时检查文件工具和命令子进程。DSH 的「工作区写入」还允许宿主明确指定的额外可写目录以及平台临时目录，验证越界时请使用这些目录之外的位置。

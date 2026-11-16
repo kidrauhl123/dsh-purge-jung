@@ -9,7 +9,7 @@ const { buildSync } = require("esbuild");
 const code = buildSync({
   stdin: {
     contents:
-      'export * from "./src/api/client.js"; export {setTranslate,zh} from "./src/shared/locale.js"; export { StatusStrip, VersionNotice } from "./src/components/page.js"; export { PurgifySection } from "./src/components/settings-form.js";',
+      'export * from "./src/api/client.js"; export {setTranslate,zh} from "./src/shared/locale.js"; export { StatusStrip, VersionNotice } from "./src/components/page.js"; export { PurgifySection } from "./src/components/settings-form.js"; export {tallyPatches,PatchGroups} from "./src/components/patch-status.js";',
     resolveDir: path.join(__dirname, ".."),
   },
   bundle: true,
@@ -44,6 +44,105 @@ const reply = (body) => ({
   ok: true,
   status: 200,
   text: async () => JSON.stringify(body),
+});
+test("mixed diagnostic states retain exact finite counts without counting drift as applied", () => {
+  const h = harness();
+  const rows = [
+    ...Array.from({ length: 65 }, () => ({ st: "applied" })),
+    ...Array.from({ length: 8 }, () => ({ st: "drifted" })),
+    ...Array.from({ length: 2 }, () => ({ st: "disabled" })),
+    ...Array.from({ length: 3 }, () => ({ st: "skipped" })),
+  ];
+  const tally = h.tallyPatches(rows);
+  assert.equal(tally.applied, 65);
+  assert.equal(tally.total, 78);
+  assert.equal(tally.drifted, 8);
+  assert.equal(tally.disabled, 2);
+  assert.equal(tally.skipped, 3);
+  for (const value of Object.values(h.tallyPatches([]))) assert.equal(value, 0);
+  for (const value of Object.values(tally)) assert(Number.isFinite(value));
+});
+test("status counts come from per-patch rows, never from display groups", async () => {
+  const h = harness();
+  // 真实载荷：patch_rows 是 88 条逐补丁真值；patches 只有 3 个显示分组。
+  const rows = [
+    ...Array.from({ length: 73 }, (_, i) => ({
+      id: i + 1,
+      layer: "代码",
+      name: "a",
+      status: "applied",
+    })),
+    ...Array.from({ length: 2 }, (_, i) => ({
+      id: 80 + i,
+      layer: "代码",
+      name: "b",
+      status: "disabled",
+    })),
+    ...Array.from({ length: 13 }, (_, i) => ({
+      id: 90 + i,
+      layer: "工具",
+      name: "c",
+      status: "skipped",
+    })),
+  ];
+  const state = {
+    ok: true,
+    ai_base: "/fixture",
+    patch_status: {},
+    patch_rows: rows,
+    patches: [
+      { id: 1, ids: [1, 2, 3], layer: "代码", status: "applied" },
+      { id: 80, ids: [80, 81], layer: "代码", status: "disabled" },
+      { id: 90, ids: [90, 91, 92], layer: "工具", status: "skipped" },
+    ],
+  };
+  const markup = renderToStaticMarkup(
+    React.createElement(h.PatchGroups, { state }),
+  );
+  assert.match(markup, /73 \/ 75/, "分组表不能把 88 条压成 3 条");
+  assert.doesNotMatch(markup, /3 \/ 3/, "不能按分组数当分母");
+});
+
+test("summary and group headings explain drift, partial results and opt-in choices", async () => {
+  const patches = [
+    "applied",
+    "drifted",
+    "drifted",
+    "disabled",
+    "partial",
+    "pending",
+    "unmatched",
+  ].map((status, id) => ({ id, status, layer: "代码" }));
+  const state = { ok: true, ai_base: "/fixture", patches, patch_status: {} };
+  const h = harness(async (url) =>
+    reply(
+      String(url).endsWith("/status")
+        ? state
+        : {
+            ok: true,
+            versions: [],
+            content: "user draft",
+            defaultContent: "default",
+          },
+    ),
+  );
+  const groups = renderToStaticMarkup(
+    React.createElement(h.PatchGroups, { state }),
+  );
+  let view;
+  await act(async () => {
+    view = create(React.createElement(h.PurgifySection));
+  });
+  const summary = JSON.stringify(view.toJSON());
+  for (const text of [groups, summary]) {
+    assert.match(text, /锚点漂移 2/);
+    assert.match(text, /可选关闭 1/);
+    assert.match(text, /部分命中 1/);
+    assert.match(text, /待处理 1/);
+    assert.match(text, /没对上 1/);
+    assert.doesNotMatch(text, /NaN/);
+  }
+  await act(async () => view.unmount());
 });
 test("concurrent status reads share work; settled responses and post-mutation reads are fresh", async () => {
   const waiting = [],
@@ -126,7 +225,7 @@ test("failed status can retry and does not fabricate zero patch counts or a miss
   fail = false;
   const refresh = view.root
     .findAllByType("button")
-    .find((b) => b.children.includes("刷新"));
+    .find((b) => String(b.props.className || "").includes("dshpp-scan"));
   await act(async () => {
     refresh.props.onClick();
   });
@@ -149,4 +248,28 @@ test("a confirmed missing host remains a visible diagnostic, not a read failure"
   );
   assert.match(markup, /未定位宿主/);
   assert.doesNotMatch(markup, /读取失败/);
+});
+
+test("the compatibility strip distinguishes archived, kernel-only and unknown future levels", () => {
+  const h = harness();
+  for (const [level, label] of Object.entries({
+    qualified: "已回归验证",
+    mixed: "组件版本不一致",
+    unverified: "未验证版本",
+    sealed: "已定位归档宿主",
+    "kernel-verified": "内核已验证，宿主未验证",
+    "no-host": "未定位宿主",
+    "future-level": "future-level",
+  })) {
+    const html = renderToStaticMarkup(
+      React.createElement(h.StatusStrip, {
+        info: {
+          ok: true,
+          compatibility: { level, host_version: "0.2.2-rc.1" },
+        },
+      }),
+    );
+    assert.ok(html.includes(label), level);
+    assert.equal(html.includes("is-ok"), level === "qualified");
+  }
 });
